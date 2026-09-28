@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import { Brand } from "./Brand";
 import { Icon } from "./Icons";
-import { apiRequest, getBusinessId, isRecord, persistBusinessId } from "@/lib/api";
+import { apiRequest, getBusinessId, isRecord, persistAuthToken, persistBusinessId } from "@/lib/api";
 
 const navigation = [
   { label: "Overview", href: "/", icon: "grid" },
@@ -66,6 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         body: JSON.stringify(body)
       });
       if (!isRecord(data) || !Array.isArray(data.businesses)) throw new Error("The API returned an invalid sign-in response.");
+      if (typeof data.token === "string") persistAuthToken(data.token);
       const firstBusiness = data.businesses.find(isRecord);
       if (typeof firstBusiness?.id === "string") persistBusinessId(firstBusiness.id);
       setAuthState("signedIn");
@@ -79,6 +80,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   async function signOut() {
     try {
       await apiRequest("/api/auth/logout", { method: "POST" });
+      persistAuthToken("");
       setAuthState("signedOut");
       setPassword("");
     } catch (reason) {

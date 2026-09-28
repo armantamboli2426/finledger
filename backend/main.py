@@ -461,7 +461,21 @@ def create_session_token(user_id: str) -> str:
     return f"{payload}.{signature}"
 
 
-def authenticated_user_id(token: Optional[str]) -> Optional[str]:
+def extract_auth_token(request: Request) -> Optional[str]:
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    x_token = request.headers.get("x-auth-token", "").strip()
+    if x_token:
+        return x_token
+    return request.cookies.get(AUTH_COOKIE)
+
+
+def authenticated_user_id(token_or_request: Any) -> Optional[str]:
+    if isinstance(token_or_request, Request):
+        token = extract_auth_token(token_or_request)
+    else:
+        token = token_or_request
     if not token:
         return None
     try:
@@ -492,7 +506,7 @@ def user_has_business_membership(user_id: str, business_id: str) -> bool:
 def require_business_owner(request: Request, business_id: str) -> None:
     if not auth_required():
         return
-    user_id = authenticated_user_id(request.cookies.get(AUTH_COOKIE))
+    user_id = authenticated_user_id(request)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Sign in to manage provider connections.")
     with database.session() as session:
@@ -514,7 +528,7 @@ async def enforce_auth_and_business_membership(request: Request, call_next):
         "/api/auth/session", "/api/auth/logout", "/webhooks/whatsapp", "/api/webhooks/whatsapp",
     }:
         return await call_next(request)
-    user_id = await run_in_threadpool(authenticated_user_id, request.cookies.get(AUTH_COOKIE))
+    user_id = await run_in_threadpool(authenticated_user_id, request)
     if user_id is None:
         return JSONResponse(status_code=401, content={"detail": "Sign in to access this workspace."})
     if path in ("/docs", "/redoc", "/openapi.json"):
@@ -531,16 +545,18 @@ async def enforce_auth_and_business_membership(request: Request, call_next):
     return await call_next(request)
 
 
-def _set_auth_cookie(response: Any, user_id: str) -> None:
+def _set_auth_cookie(response: Any, user_id: str) -> str:
+    token = create_session_token(user_id)
     response.set_cookie(
         AUTH_COOKIE,
-        create_session_token(user_id),
+        token,
         max_age=AUTH_SESSION_SECONDS,
         httponly=True,
         secure=os.getenv("FINLEDGER_ENV", "development").strip().lower() == "production",
-        samesite="strict",
+        samesite="lax",
         path="/",
     )
+    return token
 
 
 def _user_businesses(user_id: str) -> list[dict[str, str]]:
@@ -593,8 +609,8 @@ def register_account(request: RegistrationRequest, response: Response) -> dict[s
         session.flush()
         session.add(BusinessMembershipRow(user_id=user_id, business_id=business_id, role="owner"))
         session.commit()
-    _set_auth_cookie(response, user_id)
-    return {"user": {"id": user_id, "email": email, "phone": phone}, "businesses": _user_businesses(user_id), "auth_required": True}
+    token = _set_auth_cookie(response, user_id)
+    return {"token": token, "user": {"id": user_id, "email": email, "phone": phone}, "businesses": _user_businesses(user_id), "auth_required": True}
 
 
 @app.post("/api/auth/login")
@@ -608,13 +624,13 @@ def login_account(request: LoginRequest, response: Response) -> dict[str, Any]:
     businesses = _user_businesses(user.id)
     if not businesses:
         raise HTTPException(status_code=403, detail="This account has no business workspace.")
-    _set_auth_cookie(response, user.id)
-    return {"user": {"id": user.id, "email": user.email, "phone": user.phone}, "businesses": businesses, "auth_required": True}
+    token = _set_auth_cookie(response, user.id)
+    return {"token": token, "user": {"id": user.id, "email": user.email, "phone": user.phone}, "businesses": businesses, "auth_required": True}
 
 
 @app.get("/api/auth/session")
 def auth_session(request: Request) -> dict[str, Any]:
-    user_id = authenticated_user_id(request.cookies.get(AUTH_COOKIE))
+    user_id = authenticated_user_id(request)
     if user_id is None:
         return {"authenticated": False, "auth_required": auth_required()}
     with database.session() as session:

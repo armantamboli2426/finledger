@@ -37,11 +37,34 @@ export function persistBusinessId(value: string): void {
   }
 }
 
+const AUTH_TOKEN_KEY = "finledger.auth_token";
+
+export function getAuthToken(): string {
+  if (typeof window !== "undefined") {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY) || "";
+  }
+  return "";
+}
+
+export function persistAuthToken(token: string): void {
+  if (typeof window !== "undefined") {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  }
+}
+
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     const headers = new Headers(init?.headers);
     headers.set("X-Business-ID", getBusinessId());
+    const token = getAuthToken();
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
     let body = init?.body;
     if (body instanceof FormData && path.startsWith("/api/") && !body.has("business_id")) {
       body.append("business_id", getBusinessId());
