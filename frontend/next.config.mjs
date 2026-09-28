@@ -1,5 +1,5 @@
 /** @type {import('next').NextConfig} */
-const backendUrl = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || "https://police-instruction-relationships-ordered.trycloudflare.com";
+const backendUrl = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || "https://backend-production-2c101.up.railway.app";
 
 const nextConfig = {
   poweredByHeader: false,
