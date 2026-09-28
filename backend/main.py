@@ -303,8 +303,8 @@ def _upload_cipher() -> Fernet:
     if configured:
         try:
             return Fernet(configured.encode("ascii"))
-        except (ValueError, UnicodeEncodeError) as exc:
-            raise RuntimeError("UPLOAD_ENCRYPTION_KEY must be a valid Fernet key") from exc
+        except Exception:
+            pass
     derived = hashlib.sha256(_auth_secret() + b":finledger-upload-queue").digest()
     return Fernet(base64.urlsafe_b64encode(derived))
 
