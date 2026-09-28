@@ -1417,6 +1417,46 @@ def parse_amount(raw: str) -> Optional[float]:
         return None
 
 
+_DEBIT_PATTERNS = re.compile(
+    r"\b(?:dr|debit|debited|sent|paid|withdrawal|w/d|transfer\s+to|pay\s+to|payment|charges?|fee|bill|purchase|pos|atm|tax|gst)\b"
+    r"|sent\s+to|paid\s+to|payment\s+to|upi[/-]out|upi[/-]pay",
+    re.IGNORECASE,
+)
+_CREDIT_PATTERNS = re.compile(
+    r"\b(?:cr|credit|credited|received|recv|deposit|refund|cashback|interest|income|sales)\b"
+    r"|received\s+from|recv\s+from|upi[/-]in",
+    re.IGNORECASE,
+)
+
+
+def _reconcile_row_signs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prev_bal: Optional[float] = None
+    for r in rows:
+        desc = str(r.get("description", ""))
+        amt = float(r.get("amount", 0.0))
+        bal = r.get("balance")
+
+        # 1. Keyword-based sign determination
+        is_debit = bool(_DEBIT_PATTERNS.search(desc))
+        is_credit = bool(_CREDIT_PATTERNS.search(desc))
+        if is_debit and not is_credit and amt > 0:
+            r["amount"] = -abs(amt)
+        elif is_credit and not is_debit and amt < 0:
+            r["amount"] = abs(amt)
+
+        # 2. Balance delta reconciliation (mathematical ground truth)
+        if bal is not None and prev_bal is not None:
+            diff = round(float(bal) - float(prev_bal), 2)
+            if diff < -0.01:
+                r["amount"] = -abs(r["amount"])
+            elif diff > 0.01:
+                r["amount"] = abs(r["amount"])
+
+        if bal is not None:
+            prev_bal = float(bal)
+    return rows
+
+
 def parse_csv_statement(text: str) -> list[dict[str, Any]]:
     sample = text[:4096]
     try:
@@ -1438,6 +1478,7 @@ def parse_csv_statement(text: str) -> list[dict[str, Any]]:
     balance_col = find_column(("balance", "closing balance"))
     reference_col = find_column(("reference", "ref no", "transaction id", "chq", "cheque"))
     currency_col = find_column(("currency", "ccy"))
+    type_col = find_column(("type", "txn type", "transaction type", "dr/cr", "d/c"))
     if not date_col or not description_col or not (amount_col or debit_col or credit_col):
         return []
     parsed = []
@@ -1451,6 +1492,12 @@ def parse_csv_statement(text: str) -> list[dict[str, Any]]:
             if debit not in (None, 0) and credit not in (None, 0):
                 continue
             amount = -(abs(debit)) if debit not in (None, 0) else (abs(credit) if credit is not None else None)
+        if type_col and amount is not None:
+            t_str = str(row.get(type_col, "")).strip().lower()
+            if t_str in ("dr", "debit", "sent", "out", "w/d", "withdrawal"):
+                amount = -abs(amount)
+            elif t_str in ("cr", "credit", "received", "in", "deposit"):
+                amount = abs(amount)
         if tx_date and description and amount is not None:
             parsed_row: dict[str, Any] = {"date": tx_date, "description": description, "amount": amount}
             if balance_col and (balance := parse_amount(str(row.get(balance_col, "")))) is not None:
@@ -1460,7 +1507,7 @@ def parse_csv_statement(text: str) -> list[dict[str, Any]]:
             if currency_col and re.fullmatch(r"[A-Za-z]{3}", str(row.get(currency_col, "")).strip()):
                 parsed_row["currency"] = str(row[currency_col]).strip().upper()
             parsed.append(parsed_row)
-    return parsed
+    return _reconcile_row_signs(parsed)
 
 
 def parse_statement_text(text: str) -> list[dict[str, Any]]:
@@ -1491,14 +1538,18 @@ def parse_statement_text(text: str) -> list[dict[str, Any]]:
         if not parsed_amounts:
             continue
 
+        is_debit = bool(_DEBIT_PATTERNS.search(line_str))
+        is_credit = bool(_CREDIT_PATTERNS.search(line_str))
+
         amount = None
         balance = None
         if len(parsed_amounts) == 1:
-            amount = parsed_amounts[0][0]
+            val = parsed_amounts[0][0]
+            amount = -abs(val) if is_debit and not is_credit else (abs(val) if is_credit and not is_debit else val)
         elif len(parsed_amounts) == 2:
             amt_val = parsed_amounts[0][0]
             bal_val = parsed_amounts[1][0]
-            amount = amt_val
+            amount = -abs(amt_val) if is_debit and not is_credit else (abs(amt_val) if is_credit and not is_debit else amt_val)
             balance = abs(bal_val)
         elif len(parsed_amounts) >= 3:
             val1 = parsed_amounts[0][0]
@@ -1510,7 +1561,8 @@ def parse_statement_text(text: str) -> list[dict[str, Any]]:
             elif abs(val1) == 0 and abs(val2) > 0:
                 amount = abs(val2)
             else:
-                amount = val1 if val1 != 0 else val2
+                amt_val = val1 if val1 != 0 else val2
+                amount = -abs(amt_val) if is_debit and not is_credit else (abs(amt_val) if is_credit and not is_debit else amt_val)
 
         if amount is None:
             continue
@@ -1528,20 +1580,7 @@ def parse_statement_text(text: str) -> list[dict[str, Any]]:
             row["balance"] = balance
         rows.append(row)
 
-    # Reconcile signs using balance deltas where available
-    prev_bal = None
-    for r in rows:
-        bal = r.get("balance")
-        if bal is not None and prev_bal is not None:
-            diff = bal - prev_bal
-            if abs(diff + abs(r["amount"])) < 0.05:
-                r["amount"] = -abs(r["amount"])
-            elif abs(diff - abs(r["amount"])) < 0.05:
-                r["amount"] = abs(r["amount"])
-        if bal is not None:
-            prev_bal = bal
-
-    return rows
+    return _reconcile_row_signs(rows)
 
 
 def extract_pdf_text(payload: bytes) -> str:
